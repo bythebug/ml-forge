@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from pydantic import BaseModel
@@ -8,6 +9,14 @@ from data.data_loader import dataset_statistics, load_dataset, missing_value_rep
 from db.models import FeatureSet, Project
 from db.session import get_db
 from features.feature_builder import build_feature_set, validate_feature_definitions
+from features.feature_selector import (
+    backward_elimination,
+    forward_selection,
+    information_value,
+    recursive_elimination,
+    statistical_selection,
+    variance_threshold,
+)
 
 UPLOAD_DIR = Path("data/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -166,6 +175,124 @@ def preview_feature_set(
         "original_columns": df.columns.tolist(),
         "engineered_columns": [c for c in augmented.columns if c not in df.columns],
         "preview": preview.where(preview.notna(), other=None).to_dict(orient="records"),
+    }
+
+
+# ─── Feature selection request model ─────────────────────────────────────────
+
+class SelectFeaturesRequest(BaseModel):
+    target: str
+    method: Literal[
+        "correlation", "spearman", "variance_threshold", "forward", "backward", "iv"
+    ] = "correlation"
+    n_features: int = 10
+    threshold: float = 0.05
+
+
+# ─── GET /projects/{project_id}/feature_importance ───────────────────────────
+
+@app.get("/projects/{project_id}/feature_importance")
+def feature_importance(
+    project_id: int,
+    target: str,
+    method: str = "correlation",
+    db: Session = Depends(get_db),
+):
+    """Return each feature's correlation (or mutual info) score with the target column."""
+    project = _get_project_or_404(db, project_id)
+    df = _load_project_dataset(project)
+
+    if target not in df.columns:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Target column '{target}' not found in dataset.",
+        )
+
+    result = statistical_selection(df, target=target, method=method, threshold=0.0)
+    return {
+        "project_id": project_id,
+        "target": target,
+        "method": method,
+        "importance_scores": result["scores"],
+    }
+
+
+# ─── POST /projects/{project_id}/select_features ─────────────────────────────
+
+@app.post("/projects/{project_id}/select_features")
+def select_features(
+    project_id: int,
+    body: SelectFeaturesRequest,
+    db: Session = Depends(get_db),
+):
+    """Run a feature selection method and return the selected column names."""
+    project = _get_project_or_404(db, project_id)
+    df = _load_project_dataset(project)
+
+    if body.target not in df.columns:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Target column '{body.target}' not found.",
+        )
+
+    method = body.method
+    try:
+        if method in ("correlation", "spearman", "mutual_info"):
+            result = statistical_selection(
+                df, target=body.target, method=method, threshold=body.threshold
+            )
+        elif method == "variance_threshold":
+            result = variance_threshold(df, threshold=body.threshold)
+        elif method == "forward":
+            result = forward_selection(df, target=body.target, max_features=body.n_features)
+        elif method == "backward":
+            result = backward_elimination(df, target=body.target, max_features=body.n_features)
+        elif method == "iv":
+            iv_scores = information_value(df, target_col=body.target)
+            selected = list(iv_scores.keys())[: body.n_features]
+            result = {"method": "iv", "selected": selected, "scores": iv_scores}
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Unknown selection method '{method}'.",
+            )
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+    return {"project_id": project_id, **result}
+
+
+# ─── GET /projects/{project_id}/feature_stats ────────────────────────────────
+
+@app.get("/projects/{project_id}/feature_stats")
+def feature_stats(project_id: int, db: Session = Depends(get_db)):
+    """Return correlation matrix and per-column distribution stats."""
+    project = _get_project_or_404(db, project_id)
+    df = _load_project_dataset(project)
+
+    numeric = df.select_dtypes(include=["number"])
+
+    corr_matrix = numeric.corr().round(4).where(
+        numeric.corr().notna(), other=None
+    ).to_dict()
+
+    distribution = {
+        col: {
+            "mean":     round(float(numeric[col].mean()), 4),
+            "std":      round(float(numeric[col].std()), 4),
+            "skewness": round(float(numeric[col].skew()), 4),
+            "kurtosis": round(float(numeric[col].kurtosis()), 4),
+            "min":      round(float(numeric[col].min()), 4),
+            "max":      round(float(numeric[col].max()), 4),
+        }
+        for col in numeric.columns
+    }
+
+    return {
+        "project_id": project_id,
+        "numeric_columns": numeric.columns.tolist(),
+        "correlation_matrix": corr_matrix,
+        "distribution_stats": distribution,
     }
 
 
