@@ -1,0 +1,76 @@
+version: "3.9"
+
+# ─── volumes ──────────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+  mlflow_data:
+
+# ─── services ─────────────────────────────────────────────────────────────────
+services:
+
+  # ── PostgreSQL — app database ───────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       ml_forge
+      POSTGRES_USER:     ml_forge
+      POSTGRES_PASSWORD: ml_forge_secret
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ml_forge"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── MLflow tracking server ───────────────────────────────────────────────────
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.13.0
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MLFLOW_BACKEND_STORE_URI: >-
+        postgresql://ml_forge:ml_forge_secret@postgres:5432/ml_forge
+      MLFLOW_ARTIFACT_ROOT: /mlflow/artifacts
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow/artifacts
+    command: >
+      mlflow server
+        --backend-store-uri postgresql://ml_forge:ml_forge_secret@postgres:5432/ml_forge
+        --default-artifact-root /mlflow/artifacts
+        --host 0.0.0.0
+        --port 5000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── ml-forge API ─────────────────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    environment:
+      DATABASE_URL:          postgresql://ml_forge:ml_forge_secret@postgres:5432/ml_forge
+      MLFLOW_TRACKING_URI:   http://mlflow:5000
+      MLFLOW_ARTIFACT_ROOT:  /mlflow/artifacts
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - mlflow_data:/mlflow/artifacts
+    command: uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload

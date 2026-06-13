@@ -31,10 +31,11 @@ class TrainResult:
     metrics: dict
     training_time_s: float
     model_path: Optional[str] = None
+    mlflow_run_id: Optional[str] = None       # set after MLflow logging
 
     def to_metrics_dict(self) -> dict:
         """Serialisable dict for storage in TrainingRun.metrics JSONB."""
-        return {
+        d = {
             "status": "completed",
             "task": self.task,
             "training_time_s": round(self.training_time_s, 3),
@@ -42,6 +43,9 @@ class TrainResult:
             "model_path": self.model_path,
             **self.metrics,
         }
+        if self.mlflow_run_id:
+            d["mlflow_run_id"] = self.mlflow_run_id
+        return d
 
 
 # ── core training function ────────────────────────────────────────────────────
@@ -54,12 +58,19 @@ def train_model(
     y_val: Optional[np.ndarray | pd.Series] = None,
     hyperparams: Optional[dict] = None,
     task: Task = "classification",
+    mlflow_experiment_id: Optional[str] = None,
+    mlflow_feature_set_name: str = "unknown",
+    mlflow_project_id: Optional[int] = None,
+    mlflow_db_run_id: Optional[int] = None,
 ) -> TrainResult:
     """
     Build, fit, and evaluate one model. Returns a TrainResult with metrics.
 
     If X_val / y_val are provided, reports held-out metrics.
     Otherwise, reports training-set metrics only (use with caution — optimistic).
+
+    If `mlflow_experiment_id` is provided, logs params, metrics, and the model
+    artifact to that MLflow experiment. Stores the MLflow run_id on the result.
     """
     model = build_model(model_type, hyperparams, task)
     hp = {**_get_defaults(model_type), **(hyperparams or {})}
@@ -72,7 +83,7 @@ def train_model(
     y_eval = y_val if y_val is not None else y_train
     metrics = _evaluate(model, X_eval, y_eval, task)
 
-    return TrainResult(
+    result = TrainResult(
         model_type=model_type,
         task=task,
         model=model,
@@ -80,6 +91,22 @@ def train_model(
         metrics=metrics,
         training_time_s=elapsed,
     )
+
+    if mlflow_experiment_id:
+        try:
+            from tracking.mlflow_integration import MLflowTracker
+            tracker = MLflowTracker()
+            result.mlflow_run_id = tracker.log_run(
+                result=result,
+                experiment_id=mlflow_experiment_id,
+                feature_set_name=mlflow_feature_set_name,
+                project_id=mlflow_project_id or 0,
+                db_run_id=mlflow_db_run_id,
+            )
+        except Exception:
+            pass  # MLflow unavailable — training still succeeds
+
+    return result
 
 
 # ── multi-model training ──────────────────────────────────────────────────────
@@ -91,10 +118,14 @@ def train_multiple(
     X_val: Optional[np.ndarray | pd.DataFrame] = None,
     y_val: Optional[np.ndarray | pd.Series] = None,
     task: Task = "classification",
+    mlflow_experiment_id: Optional[str] = None,
+    mlflow_feature_set_name: str = "unknown",
+    mlflow_project_id: Optional[int] = None,
 ) -> list[TrainResult]:
     """
     Train each model in `configs` and return results sorted by primary metric.
     Config format: [{"type": "random_forest", "hyperparams": {...}}, ...]
+    Pass `mlflow_experiment_id` to log every run to MLflow automatically.
     """
     results = []
     for cfg in configs:
@@ -106,6 +137,9 @@ def train_multiple(
             y_val=y_val,
             hyperparams=cfg.get("hyperparams"),
             task=task,
+            mlflow_experiment_id=mlflow_experiment_id,
+            mlflow_feature_set_name=mlflow_feature_set_name,
+            mlflow_project_id=mlflow_project_id,
         )
         results.append(result)
 

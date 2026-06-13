@@ -26,6 +26,7 @@ from features.feature_selector import (
     variance_threshold,
 )
 from models.trainer import load_model, model_save_path, save_model, train_multiple
+from tracking.mlflow_integration import MLflowTracker
 
 UPLOAD_DIR = Path("data/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -365,8 +366,25 @@ def train_run(
     X_train_s = scaler.transform(X_train)
     X_val_s = scaler.transform(X_val)
 
+    # get-or-create MLflow experiment for this project (silently skip if unavailable)
+    mlflow_experiment_id: Optional[str] = None
+    try:
+        tracker = MLflowTracker()
+        mlflow_experiment_id = tracker.get_or_create_experiment(
+            project_id=project_id,
+            project_name=project.name,
+        )
+    except Exception:
+        pass
+
     configs = [{"type": m.type, "hyperparams": m.hyperparams} for m in body.models]
-    results = train_multiple(configs, X_train_s, y_train, X_val_s, y_val, task=body.task)
+    results = train_multiple(
+        configs, X_train_s, y_train, X_val_s, y_val,
+        task=body.task,
+        mlflow_experiment_id=mlflow_experiment_id,
+        mlflow_feature_set_name=feature_set.name,
+        mlflow_project_id=project_id,
+    )
 
     run_records = []
     for result in results:
@@ -595,6 +613,73 @@ def run_analysis(
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
+
+# ─── GET /projects/{project_id}/experiments ──────────────────────────────────
+
+@app.get("/projects/{project_id}/experiments")
+def get_experiments(project_id: int, db: Session = Depends(get_db)):
+    """Return the MLflow experiment for this project and all logged runs."""
+    project = _get_project_or_404(db, project_id)
+
+    try:
+        tracker = MLflowTracker()
+        experiment_id = tracker.get_or_create_experiment(project_id, project.name)
+        experiment = tracker.get_experiment(experiment_id)
+        runs = tracker.get_runs(experiment_id)
+        best = tracker.get_best_run(experiment_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"MLflow unavailable: {exc}. Ensure MLFLOW_TRACKING_URI is set and the server is running.",
+        )
+
+    return {
+        "project_id": project_id,
+        "experiment": experiment,
+        "mlflow_ui_url": tracker.ui_url(experiment_id=experiment_id),
+        "total_runs": len(runs),
+        "runs": runs,
+        "best_run": best,
+    }
+
+
+# ─── GET /projects/{project_id}/experiments/best ─────────────────────────────
+
+@app.get("/projects/{project_id}/experiments/best")
+def best_mlflow_run(
+    project_id: int,
+    metric: str = "accuracy",
+    db: Session = Depends(get_db),
+):
+    """Return the best MLflow run for a metric, with a direct UI link."""
+    project = _get_project_or_404(db, project_id)
+
+    try:
+        tracker = MLflowTracker()
+        experiment_id = tracker.get_or_create_experiment(project_id, project.name)
+        best = tracker.get_best_run(experiment_id, metric=metric)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"MLflow unavailable: {exc}",
+        )
+
+    if not best:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No runs logged for project {project_id}.",
+        )
+
+    return {
+        "project_id": project_id,
+        "metric": metric,
+        "best_run": best,
+        "mlflow_ui_url": tracker.ui_url(
+            experiment_id=experiment_id,
+            run_id=best["run_id"],
+        ),
+    }
+
 
 def _infer_n_test_from_run(run: dict) -> Optional[int]:
     cm = (run.get("metrics") or {}).get("confusion_matrix")
