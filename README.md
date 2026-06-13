@@ -142,7 +142,7 @@ ml-forge/
 ├── features/           ← 12 engineering techniques, selection, scaling
 ├── models/             ← 5 model families + trainer
 ├── tracking/           ← MLflow integration
-├── tests/              ← pytest suite (170+ tests)
+├── tests/              ← pytest suite (213 tests, all passing)
 ├── docker-compose.yml
 ├── Dockerfile
 └── requirements.txt
