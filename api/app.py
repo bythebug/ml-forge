@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from pydantic import BaseModel
@@ -8,8 +8,15 @@ from sqlalchemy.orm import Session
 from data.data_loader import dataset_statistics, load_dataset, missing_value_report
 from db.models import FeatureSet, Project, TrainingRun
 from db.session import get_db
+from evaluation.analysis import (
+    confusion_matrix_analysis,
+    error_examples,
+    feature_importance_analysis,
+    residual_analysis,
+)
+from evaluation.comparator import compare_runs, find_best_model
+from evaluation.evaluator import bootstrap_confidence_interval, evaluate_model
 from features.feature_builder import build_feature_set, validate_feature_definitions
-from models.trainer import load_model, model_save_path, save_model, train_multiple
 from features.feature_selector import (
     backward_elimination,
     forward_selection,
@@ -18,6 +25,7 @@ from features.feature_selector import (
     statistical_selection,
     variance_threshold,
 )
+from models.trainer import load_model, model_save_path, save_model, train_multiple
 
 UPLOAD_DIR = Path("data/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -453,7 +461,147 @@ def _primary_metric(metrics: dict | None) -> dict | None:
     return None
 
 
+# ─── GET /projects/{project_id}/comparison ───────────────────────────────────
+
+@app.get("/projects/{project_id}/comparison")
+def comparison(
+    project_id: int,
+    metric: str = "accuracy",
+    db: Session = Depends(get_db),
+):
+    """Compare all training runs for a project, ranked by `metric`."""
+    _get_project_or_404(db, project_id)
+    runs = db.query(TrainingRun).filter(TrainingRun.project_id == project_id).all()
+    if not runs:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No training runs found for this project.",
+        )
+
+    run_dicts = [
+        {
+            "run_id": r.id,
+            "model_type": r.model_type,
+            "feature_set_id": r.feature_set_id,
+            "metrics": r.metrics or {},
+            "created_at": str(r.created_at),
+        }
+        for r in runs
+    ]
+    return {"project_id": project_id, **compare_runs(run_dicts, primary_metric=metric)}
+
+
+# ─── GET /projects/{project_id}/best_model ───────────────────────────────────
+
+@app.get("/projects/{project_id}/best_model")
+def best_model(
+    project_id: int,
+    metric: str = "accuracy",
+    db: Session = Depends(get_db),
+):
+    """Return the best-performing run with a recommendation and confidence interval."""
+    _get_project_or_404(db, project_id)
+    runs = db.query(TrainingRun).filter(TrainingRun.project_id == project_id).all()
+    if not runs:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No training runs found.",
+        )
+
+    run_dicts = [
+        {"run_id": r.id, "model_type": r.model_type, "metrics": r.metrics or {}}
+        for r in runs
+    ]
+    result = find_best_model(run_dicts, primary_metric=metric)
+
+    # add confidence interval for accuracy/F1 metrics
+    best = result["best_run"]
+    n_test = _infer_n_test_from_run(best)
+    metric_val = (best.get("metrics") or {}).get(metric)
+    if metric_val is not None and n_test:
+        try:
+            lo, hi = bootstrap_confidence_interval(metric_val, n_test)
+            result["confidence_interval_95"] = {"lower": lo, "upper": hi}
+        except Exception:
+            pass
+
+    return {"project_id": project_id, **result}
+
+
+# ─── GET /projects/{project_id}/runs/{run_id}/analysis ───────────────────────
+
+@app.get("/projects/{project_id}/runs/{run_id}/analysis")
+def run_analysis(
+    project_id: int,
+    run_id: int,
+    target_col: str,
+    task: str = "classification",
+    db: Session = Depends(get_db),
+):
+    """Detailed error analysis for a specific training run."""
+    from sklearn.model_selection import train_test_split
+    from features.normalizer import Scaler
+
+    project = _get_project_or_404(db, project_id)
+    run = db.get(TrainingRun, run_id)
+    if not run or run.project_id != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Run {run_id} not found in project {project_id}.",
+        )
+
+    model_path = (run.metrics or {}).get("model_path")
+    if not model_path:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Model file path not recorded for this run.",
+        )
+
+    model = load_model(model_path)
+    df = _load_project_dataset(project)
+
+    feature_set = db.get(FeatureSet, run.feature_set_id)
+    augmented = build_feature_set(df, feature_set.features_list)
+    feature_cols = [c for c in augmented.select_dtypes(include=["number"]).columns
+                    if c != target_col]
+
+    X = augmented[feature_cols].fillna(augmented[feature_cols].mean())
+    y = augmented[target_col]
+
+    _, X_test, _, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    scaler = Scaler("standard").fit(X, feature_cols)
+    X_test_s = scaler.transform(X_test)
+
+    y_pred = model.predict(X_test_s)
+    y_true = y_test.values
+
+    response: dict = {
+        "run_id": run_id,
+        "model_type": run.model_type,
+        "task": task,
+        "n_test_samples": int(len(y_true)),
+    }
+
+    if task == "classification":
+        response["confusion_matrix_analysis"] = confusion_matrix_analysis(y_true, y_pred)
+        response["error_examples"] = error_examples(X_test, y_true, y_pred, n=10)
+    else:
+        response["residual_analysis"] = residual_analysis(y_true, y_pred)
+        response["error_examples"] = error_examples(X_test, y_true, y_pred, n=10, task="regression")
+
+    response["feature_importance"] = feature_importance_analysis(model, feature_cols)
+
+    return response
+
+
 # ─── helpers ─────────────────────────────────────────────────────────────────
+
+def _infer_n_test_from_run(run: dict) -> Optional[int]:
+    cm = (run.get("metrics") or {}).get("confusion_matrix")
+    if cm:
+        return int(sum(sum(row) for row in cm))
+    return None
+
 
 def _get_project_or_404(db: Session, project_id: int) -> Project:
     project = db.get(Project, project_id)
