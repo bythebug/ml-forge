@@ -35,6 +35,7 @@ ENV/
 *.hdf5
 *.pkl
 *.pickle
+*.joblib
 *.pt
 *.pth
 *.onnx

@@ -6,9 +6,10 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from data.data_loader import dataset_statistics, load_dataset, missing_value_report
-from db.models import FeatureSet, Project
+from db.models import FeatureSet, Project, TrainingRun
 from db.session import get_db
 from features.feature_builder import build_feature_set, validate_feature_definitions
+from models.trainer import load_model, model_save_path, save_model, train_multiple
 from features.feature_selector import (
     backward_elimination,
     forward_selection,
@@ -294,6 +295,162 @@ def feature_stats(project_id: int, db: Session = Depends(get_db)):
         "correlation_matrix": corr_matrix,
         "distribution_stats": distribution,
     }
+
+
+# ─── Training run request model ──────────────────────────────────────────────
+
+class ModelConfig(BaseModel):
+    type: str
+    hyperparams: dict = {}
+
+
+class TrainRunRequest(BaseModel):
+    feature_set_id: int
+    target_col: str
+    models: list[ModelConfig]
+    task: Literal["classification", "regression"] = "classification"
+    test_size: float = 0.2
+    random_state: int = 42
+
+
+# ─── POST /projects/{project_id}/train_run ────────────────────────────────────
+
+@app.post("/projects/{project_id}/train_run", status_code=status.HTTP_201_CREATED)
+def train_run(
+    project_id: int,
+    body: TrainRunRequest,
+    db: Session = Depends(get_db),
+):
+    """Train one or more models on the project dataset and persist results."""
+    from sklearn.model_selection import train_test_split
+    from features.normalizer import Scaler
+
+    project = _get_project_or_404(db, project_id)
+    df = _load_project_dataset(project)
+
+    feature_set = db.get(FeatureSet, body.feature_set_id)
+    if not feature_set or feature_set.project_id != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Feature set {body.feature_set_id} not found in project {project_id}.",
+        )
+
+    if body.target_col not in df.columns:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Target column '{body.target_col}' not found in dataset.",
+        )
+
+    augmented = build_feature_set(df, feature_set.features_list)
+    feature_cols = [c for c in augmented.select_dtypes(include=["number"]).columns
+                    if c != body.target_col]
+
+    X = augmented[feature_cols].fillna(augmented[feature_cols].mean())
+    y = augmented[body.target_col]
+
+    X_train, X_val, y_train, y_val = train_test_split(
+        X, y, test_size=body.test_size, random_state=body.random_state
+    )
+
+    numeric_cols = X_train.columns.tolist()
+    scaler = Scaler("standard").fit(X_train, numeric_cols)
+    X_train_s = scaler.transform(X_train)
+    X_val_s = scaler.transform(X_val)
+
+    configs = [{"type": m.type, "hyperparams": m.hyperparams} for m in body.models]
+    results = train_multiple(configs, X_train_s, y_train, X_val_s, y_val, task=body.task)
+
+    run_records = []
+    for result in results:
+        run = TrainingRun(
+            project_id=project_id,
+            feature_set_id=body.feature_set_id,
+            model_type=result.model_type,
+            metrics=result.to_metrics_dict(),
+        )
+        db.add(run)
+        db.flush()  # get run.id before commit
+
+        model_path = model_save_path(project_id, run.id, result.model_type)
+        save_model(result.model, model_path)
+        run.metrics["model_path"] = str(model_path)
+        run_records.append(run)
+
+    db.commit()
+
+    return {
+        "project_id": project_id,
+        "feature_set_id": body.feature_set_id,
+        "runs": [
+            {
+                "run_id": r.id,
+                "model_type": r.model_type,
+                "metrics": r.metrics,
+                "created_at": r.created_at,
+            }
+            for r in run_records
+        ],
+    }
+
+
+# ─── GET /projects/{project_id}/runs ─────────────────────────────────────────
+
+@app.get("/projects/{project_id}/runs")
+def list_runs(project_id: int, db: Session = Depends(get_db)):
+    """List all training runs for a project, sorted by creation time descending."""
+    _get_project_or_404(db, project_id)
+    runs = (
+        db.query(TrainingRun)
+        .filter(TrainingRun.project_id == project_id)
+        .order_by(TrainingRun.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "run_id": r.id,
+            "model_type": r.model_type,
+            "feature_set_id": r.feature_set_id,
+            "status": (r.metrics or {}).get("status", "unknown"),
+            "primary_metric": _primary_metric(r.metrics),
+            "training_time_s": (r.metrics or {}).get("training_time_s"),
+            "created_at": r.created_at,
+        }
+        for r in runs
+    ]
+
+
+# ─── GET /projects/{project_id}/runs/{run_id}/progress ───────────────────────
+
+@app.get("/projects/{project_id}/runs/{run_id}/progress")
+def run_progress(project_id: int, run_id: int, db: Session = Depends(get_db)):
+    """Return the status and full metrics for a specific training run."""
+    _get_project_or_404(db, project_id)
+    run = db.get(TrainingRun, run_id)
+
+    if not run or run.project_id != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Run {run_id} not found in project {project_id}.",
+        )
+
+    return {
+        "run_id": run_id,
+        "project_id": project_id,
+        "model_type": run.model_type,
+        "feature_set_id": run.feature_set_id,
+        "status": (run.metrics or {}).get("status", "unknown"),
+        "metrics": run.metrics,
+        "created_at": run.created_at,
+    }
+
+
+def _primary_metric(metrics: dict | None) -> dict | None:
+    if not metrics:
+        return None
+    for key in ("accuracy", "roc_auc", "f1", "r2"):
+        if key in metrics:
+            return {key: metrics[key]}
+    return None
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
