@@ -81,7 +81,8 @@ def statistical_selection(
             )
             scores[col] = float(mi[0])
 
-    scores = {k: round(v, 6) for k, v in scores.items()}
+    # NaN correlation means constant column — treat as 0 (no signal)
+    scores = {k: round(v if not (v != v) else 0.0, 6) for k, v in scores.items()}
     selected = [c for c, s in scores.items() if s >= threshold]
     dropped = [c for c, s in scores.items() if s < threshold]
 

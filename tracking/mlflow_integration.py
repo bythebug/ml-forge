@@ -29,8 +29,14 @@ class MLflowTracker:
     """Thin wrapper around the MLflow client for ml-forge."""
 
     def __init__(self, tracking_uri: Optional[str] = None) -> None:
-        self.tracking_uri = tracking_uri or MLFLOW_TRACKING_URI
-        mlflow.set_tracking_uri(self.tracking_uri)
+        if tracking_uri:
+            # Explicit URI — set it globally (used by tests and explicit config)
+            self.tracking_uri = tracking_uri
+            mlflow.set_tracking_uri(tracking_uri)
+        else:
+            # Re-read env var at construction time so monkeypatching works in tests
+            self.tracking_uri = os.getenv("MLFLOW_TRACKING_URI", MLFLOW_TRACKING_URI)
+            mlflow.set_tracking_uri(self.tracking_uri)
         self._client = mlflow.MlflowClient()
 
     # ── experiments ───────────────────────────────────────────────────────────

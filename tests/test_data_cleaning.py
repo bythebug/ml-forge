@@ -82,8 +82,10 @@ class TestOutlierDetection:
         assert result["outlier_count"] >= 1
         assert 4 in result["outlier_indices"]  # index 4 has age=200
 
-    def test_zscore_detects_extreme_value(self, base_df):
-        result = detect_outliers(base_df, column="age", method="zscore")
+    def test_zscore_detects_extreme_value(self):
+        # Need enough "normal" points so the extreme value is clearly > 3 std devs
+        df = pd.DataFrame({"age": [1.0] * 30 + [200.0]})
+        result = detect_outliers(df, column="age", method="zscore")
         assert result["outlier_count"] >= 1
 
     def test_result_contains_expected_keys(self, base_df):

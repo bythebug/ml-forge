@@ -234,7 +234,7 @@ class TestStatisticalFeatures:
         result = statistical_features(base_df, target_col="income", group_cols=["city"], agg_fns=["mean"])
         ny_mean = base_df[base_df["city"] == "NY"]["income"].mean()
         ny_rows = result[result["city"] == "NY"]["income_by_city_mean"]
-        assert (ny_rows == pytest.approx(ny_mean)).all()
+        assert all(abs(v - ny_mean) < 1e-6 for v in ny_rows)
 
     def test_multiple_group_cols(self, base_df):
         result = statistical_features(base_df, target_col="income", group_cols=["city", "gender"], agg_fns=["mean"])

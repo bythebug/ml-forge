@@ -12,7 +12,7 @@ import numpy as np
 Metric = Literal["accuracy", "f1", "roc_auc", "precision", "recall", "r2", "mae", "rmse"]
 
 # Lower is better for these metrics
-_LOWER_IS_BETTER = {"mae", "rmse", "mape"}
+_LOWER_IS_BETTER = {"mae", "rmse", "mape", "training_time_s"}
 
 
 # ── ranking ───────────────────────────────────────────────────────────────────

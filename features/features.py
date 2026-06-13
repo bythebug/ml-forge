@@ -49,13 +49,15 @@ def polynomial_features(
 
 def interaction_features(
     df: pd.DataFrame,
-    columns: list[str],
+    columns: Optional[list[str]] = None,
     pairs: Optional[list[tuple[str, str]]] = None,
 ) -> pd.DataFrame:
     """
     Multiply column pairs. If `pairs` is given, compute only those; otherwise
     compute all pairwise combinations of `columns`.
     """
+    if columns is None and pairs is None:
+        raise ValueError("Provide at least one of 'columns' or 'pairs'.")
     df = df.copy()
     target_pairs = pairs or list(combinations(columns, 2))
     for col1, col2 in target_pairs:

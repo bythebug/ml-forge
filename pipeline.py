@@ -28,10 +28,10 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 from data.data_loader import dataset_statistics, load_dataset
-from data.preprocessor import handle_missing_values, variance_threshold
+from data.preprocessor import handle_missing_values
 from evaluation.comparator import compare_runs, find_best_model
 from features.feature_builder import build_feature_set
-from features.feature_selector import statistical_selection
+from features.feature_selector import statistical_selection, variance_threshold
 from features.normalizer import Scaler
 from models.trainer import TrainResult, train_multiple
 

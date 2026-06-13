@@ -20,9 +20,14 @@ from tracking.mlflow_integration import MLflowTracker
 # ─── fixtures ────────────────────────────────────────────────────────────────
 
 @pytest.fixture
-def tracker(tmp_path):
-    """Isolated MLflowTracker backed by a temporary SQLite DB."""
+def tracker(tmp_path, monkeypatch):
+    """Isolated MLflowTracker backed by a temporary SQLite DB.
+    Sets MLFLOW_TRACKING_URI so that train_model() picks up the same URI
+    when it creates its own internal MLflowTracker instance.
+    """
     uri = f"sqlite:///{tmp_path}/mlflow_test.db"
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", uri)
+    mlflow.set_tracking_uri(uri)
     t = MLflowTracker(tracking_uri=uri)
     yield t
     mlflow.end_run()

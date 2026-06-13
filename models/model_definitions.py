@@ -109,6 +109,11 @@ def build_model(
     Build and return an unfitted sklearn-compatible estimator.
     Merges user `hyperparams` over the model's defaults.
     """
+    if model_type not in DEFAULTS:
+        raise ValueError(
+            f"Unknown model type '{model_type}'. "
+            f"Choose from: {list(DEFAULTS.keys())}"
+        )
     params = {**DEFAULTS[model_type], **(hyperparams or {})}
 
     if model_type == "logistic_regression":
@@ -145,12 +150,6 @@ def build_model(
         from sklearn.neural_network import MLPClassifier, MLPRegressor
         cls = MLPClassifier if task == "classification" else MLPRegressor
         return cls(**params)
-
-    raise ValueError(
-        f"Unknown model type '{model_type}'. "
-        f"Choose from: {list(DEFAULTS.keys())}"
-    )
-
 
 def get_hyperparameter_docs(model_type: ModelType) -> dict[str, str]:
     """Return human-readable descriptions of each hyperparameter."""
