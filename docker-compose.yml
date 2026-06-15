@@ -38,20 +38,21 @@ services:
         postgresql://ml_forge:ml_forge_secret@postgres:5432/ml_forge
       MLFLOW_ARTIFACT_ROOT: /mlflow/artifacts
     ports:
-      - "5000:5000"
+      - "5001:5000"
     volumes:
       - mlflow_data:/mlflow/artifacts
     command: >
-      mlflow server
+      sh -c "pip install psycopg2-binary -q && mlflow server
         --backend-store-uri postgresql://ml_forge:ml_forge_secret@postgres:5432/ml_forge
         --default-artifact-root /mlflow/artifacts
         --host 0.0.0.0
-        --port 5000
+        --port 5000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 15
+      start_period: 30s
 
   # ── ml-forge API ─────────────────────────────────────────────────────────────
   app:
@@ -74,3 +75,20 @@ services:
       - .:/app
       - mlflow_data:/mlflow/artifacts
     command: uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/projects"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── ml-forge Frontend ─────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "3000:3000"

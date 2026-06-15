@@ -1,13 +1,15 @@
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal, Optional
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from data.data_loader import dataset_statistics, load_dataset, missing_value_report
-from db.models import FeatureSet, Project, TrainingRun
-from db.session import get_db
+from db.models import Base, FeatureSet, Project, TrainingRun, User
+from db.session import engine, get_db
 from evaluation.analysis import (
     confusion_matrix_analysis,
     error_examples,
@@ -31,7 +33,78 @@ from tracking.mlflow_integration import MLflowTracker
 UPLOAD_DIR = Path("data/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="ml-forge", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    Base.metadata.create_all(bind=engine)
+    yield
+
+
+app = FastAPI(title="ml-forge", version="0.1.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ─── GET /projects ────────────────────────────────────────────────────────────
+
+@app.get("/projects")
+def list_projects(db: Session = Depends(get_db)):
+    """List all projects with run counts and best accuracy."""
+    projects = db.query(Project).order_by(Project.created_at.desc()).all()
+    result = []
+    for p in projects:
+        runs = db.query(TrainingRun).filter(TrainingRun.project_id == p.id).all()
+        best_accuracy = None
+        for r in runs:
+            acc = (r.metrics or {}).get("accuracy")
+            if acc is not None:
+                best_accuracy = max(best_accuracy, acc) if best_accuracy else acc
+        recent_model_types = list({r.model_type for r in runs[-3:]}) if runs else []
+        result.append({
+            "id": p.id,
+            "name": p.name,
+            "description": p.description,
+            "dataset_path": p.dataset_path,
+            "run_count": len(runs),
+            "best_accuracy": best_accuracy,
+            "recent_model_types": recent_model_types,
+            "created_at": p.created_at,
+        })
+    return result
+
+
+# ─── POST /projects ───────────────────────────────────────────────────────────
+
+class ProjectCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+
+
+@app.post("/projects", status_code=status.HTTP_201_CREATED)
+def create_project(body: ProjectCreate, db: Session = Depends(get_db)):
+    """Create a new project under the default demo user (id=1)."""
+    demo_user = db.get(User, 1)
+    if not demo_user:
+        demo_user = User(id=1, email="demo@ml-forge.local")
+        db.add(demo_user)
+        db.flush()
+
+    project = Project(user_id=demo_user.id, name=body.name, description=body.description)
+    db.add(project)
+    db.commit()
+    db.refresh(project)
+    return {
+        "id": project.id,
+        "name": project.name,
+        "description": project.description,
+        "created_at": project.created_at,
+    }
 
 
 # ─── POST /projects/{project_id}/load_data ───────────────────────────────────
@@ -399,7 +472,7 @@ def train_run(
 
         model_path = model_save_path(project_id, run.id, result.model_type)
         save_model(result.model, model_path)
-        run.metrics["model_path"] = str(model_path)
+        run.metrics = {**run.metrics, "model_path": str(model_path)}
         run_records.append(run)
 
     db.commit()

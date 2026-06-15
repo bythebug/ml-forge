@@ -59,6 +59,10 @@ checkpoints/
 *.key
 secrets/
 
+# Frontend build artifacts
+frontend/node_modules/
+frontend/dist/
+
 # OS
 .DS_Store
 Thumbs.db
@@ -68,3 +72,4 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+.gstack/
