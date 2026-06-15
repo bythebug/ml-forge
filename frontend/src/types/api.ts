@@ -22,18 +22,6 @@ export interface LoadDataResponse {
   column_names: string[];
 }
 
-export interface ColumnStats {
-  count: number;
-  null_count: number;
-  null_pct: number;
-  dtype: string;
-  unique_count?: number;
-  mean?: number;
-  std?: number;
-  min?: number;
-  max?: number;
-}
-
 export interface DataProfileResponse {
   project_id: number;
   shape: { rows: number; columns: number };
@@ -71,11 +59,6 @@ export interface FeaturePreview {
   original_columns: string[];
   engineered_columns: string[];
   preview: Record<string, unknown>[];
-}
-
-export interface ImportanceScore {
-  feature: string;
-  score: number;
 }
 
 export interface FeatureImportanceResponse {
@@ -136,8 +119,10 @@ export interface ComparisonRun {
   run_id: number;
   model_type: string;
   feature_set_id: number;
-  metrics: Record<string, number>;
+  metrics: Record<string, unknown>;
   rank: number;
+  metric_used?: string;
+  metric_value?: number;
 }
 
 export interface ComparisonResponse {
@@ -149,11 +134,20 @@ export interface ComparisonResponse {
   total_runs: number;
 }
 
+export interface BestRun {
+  run_id: number;
+  model_type: string;
+  metrics: Record<string, unknown>;
+  rank: number;
+  metric_used?: string;
+  metric_value?: number;
+}
+
 export interface BestModelResponse {
   project_id: number;
-  best_run: ComparisonRun;
+  best_run: BestRun;
+  primary_metric: string;
   recommendation: string;
-  margin: number | null;
   confidence_interval_95?: { lower: number; upper: number };
 }
 

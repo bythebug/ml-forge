@@ -17,9 +17,9 @@ interface Props {
 export default function AccuracyComparison({ runs }: Props) {
   const data = runs.map((r) => ({
     name: r.model_type.replace(/_/g, " "),
-    accuracy: r.metrics.accuracy != null ? +(r.metrics.accuracy * 100).toFixed(1) : undefined,
-    f1: r.metrics.f1 != null ? +(r.metrics.f1 * 100).toFixed(1) : undefined,
-    auc: r.metrics.roc_auc != null ? +(r.metrics.roc_auc * 100).toFixed(1) : undefined,
+    accuracy: r.metrics.accuracy != null ? +((r.metrics.accuracy as number) * 100).toFixed(1) : undefined,
+    f1: r.metrics.f1 != null ? +((r.metrics.f1 as number) * 100).toFixed(1) : undefined,
+    auc: r.metrics.roc_auc != null ? +((r.metrics.roc_auc as number) * 100).toFixed(1) : undefined,
   }));
 
   return (

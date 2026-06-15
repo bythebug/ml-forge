@@ -9,8 +9,8 @@ import AccuracyComparison from "../components/charts/AccuracyComparison";
 
 const MEDALS = ["🥇", "🥈", "🥉"];
 
-function fmt(v: number | undefined) {
-  return v != null ? (v * 100).toFixed(2) + "%" : "—";
+function fmt(v: unknown) {
+  return v != null ? ((v as number) * 100).toFixed(2) + "%" : "—";
 }
 
 export default function Results() {
@@ -51,8 +51,8 @@ export default function Results() {
 
   const scatterData = ranked.map((r) => ({
     name: r.model_type.replace(/_/g, " "),
-    x: r.metrics.training_time_s ?? 0,
-    y: r.metrics.accuracy != null ? +(r.metrics.accuracy * 100).toFixed(2) : 0,
+    x: (r.metrics.training_time_s as number) ?? 0,
+    y: r.metrics.accuracy != null ? +((r.metrics.accuracy as number) * 100).toFixed(2) : 0,
     z: 100,
   }));
 
@@ -85,10 +85,14 @@ export default function Results() {
                     {(best.confidence_interval_95.upper * 100).toFixed(1)}%]
                   </span>
                 )}
-                {best.margin != null && best.margin > 0 && (
+                {ranked.length > 1 && best.best_run.metric_value != null && ranked[1]?.metric_value != null && (
+                  best.best_run.metric_value - (ranked[1].metric_value ?? 0) > 0
+                ) && (
                   <span className="flex items-center gap-1">
                     <TrendingUp className="w-3.5 h-3.5 text-green-300" />
-                    <span className="text-green-300">+{(best.margin * 100).toFixed(2)}% over #2</span>
+                    <span className="text-green-300">
+                      +{((best.best_run.metric_value - (ranked[1].metric_value ?? 0)) * 100).toFixed(2)}% over #2
+                    </span>
                   </span>
                 )}
               </div>
@@ -135,7 +139,7 @@ export default function Results() {
                   <td className="py-3 pr-4 text-slate-700">{fmt(run.metrics.f1)}</td>
                   <td className="py-3 pr-4 text-slate-700">{fmt(run.metrics.roc_auc)}</td>
                   <td className="py-3 pr-4 text-slate-700">
-                    {run.metrics.r2 != null ? run.metrics.r2.toFixed(3) : "—"}
+                    {run.metrics.r2 != null ? (run.metrics.r2 as number).toFixed(3) : "—"}
                   </td>
                   <td className="py-3 pr-4 text-slate-500 text-xs">
                     {run.metrics.training_time_s != null
